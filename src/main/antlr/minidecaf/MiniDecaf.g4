@@ -7,7 +7,7 @@ func:
 	type IDENT '(' (type IDENT (',' type IDENT)*)? ')' '{' blockItem* '}'	# definedFunc
 	| type IDENT '(' (type IDENT (',' type IDENT)*)? ')' ';'				# declaredFunc;
 
-type: 'int';
+type: 'int' '*'*;
 
 blockItem: localDecl | stmt;
 
@@ -27,7 +27,7 @@ stmt:
 	| 'continue' ';' # continueStmt
 	;
 
-expr: IDENT '=' expr | ternary;
+expr: unary '=' expr | ternary;
 
 ternary: lor '?' expr ':' ternary | lor;
 
@@ -43,7 +43,10 @@ add: add ('+' | '-') add | mul;
 
 mul: mul ('*' | '/' | '%') mul | unary;
 
-unary: ('-' | '!' | '~') unary | postfix;
+unary:
+	('-' | '~' | '!' | '&' | '*') unary	# opUnary
+	| '(' type ')' unary # castUnary
+	| postfix # postfixUnary;
 
 postfix: IDENT '(' (expr (',' expr)*)? ')' | primary;
 
