@@ -3,7 +3,7 @@ package minidecaf;
 import java.util.*;
 
 /**
- * MiniDecaf 的类型（无类型、整型、指针）
+ * MiniDecaf 的类型（无类型、整型、指针、数组）
  *
  * @author  Namasikanam
  * @since   2020-09-11
@@ -159,6 +159,49 @@ public abstract class Type {
         @Override
         public Type valueCast(ValueCat targetValueCat) {
             return new PointerType(starNum, targetValueCat);
+        }
+    }
+
+    /**
+     * 数组类型
+     *
+     * 这是一个非常特殊的类型
+     */
+     public static class ArrayType extends Type {
+        final public Type baseType;
+        final private int size;
+
+        public ArrayType(Type baseType, int length) {
+            super("ArrayType<" + length + ":" + baseType + ">", ValueCat.RVALUE);
+            this.baseType = baseType;
+            this.size = length * baseType.getSize();
+        }
+
+        @Override
+        public boolean equals(Type type) {
+            return type instanceof ArrayType && size == type.getSize() && baseType.equals(((ArrayType)type).baseType);
+        }
+
+        @Override
+        public Type referenced() {
+            throw new UnsupportedOperationException("Error: trying referencing array.");
+        }
+
+        @Override
+        public Type dereferenced() {
+            throw new UnsupportedOperationException("Error: trying dereferencing array.");
+        }
+
+        @Override
+        public Type valueCast(ValueCat targetValueCat) {
+            if (targetValueCat == ValueCat.LVALUE)
+                throw new UnsupportedOperationException("Error: an array must be an rvalue.");
+            else return this;
+        }
+
+        @Override
+        public int getSize() {
+            return size;
         }
     }
 }

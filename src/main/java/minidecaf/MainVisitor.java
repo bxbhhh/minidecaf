@@ -146,7 +146,7 @@ public final class MainVisitor extends MiniDecafBaseVisitor<Type> {
     }
 
     @Override
-    public Type visitGlobalDecl(GlobalDeclContext ctx) {
+    public Type visitGlobalIntOrPointerDecl(GlobalIntOrPointerDeclContext ctx) {
         // 这里我们与 gcc 保持一致，全局变量可以多次声明，但只能被初始化一次。
         String name = ctx.IDENT().getText();
         if (declaredFuncTable.get(name) != null)
@@ -172,7 +172,30 @@ public final class MainVisitor extends MiniDecafBaseVisitor<Type> {
     }
 
     @Override
-    public Type visitLocalDecl(LocalDeclContext ctx) {
+    public Type visitGlobalArrayDecl(GlobalArrayDeclContext ctx) {
+        String name = ctx.IDENT().getText();
+        if (declaredFuncTable.get(name) != null)
+            reportError("a global variable and a function have the same name", ctx);
+
+        Deque<Type> types = new ArrayDeque<>();
+        types.add(visit(ctx.type()).valueCast(ValueCat.LVALUE));
+        for (int i = ctx.NUM().size() - 1; i >= 0; --i) {
+            int x = Integer.valueOf(ctx.NUM(i).getText());
+            if (x == 0)
+                reportError("the dimension of array cannot be 0", ctx);
+            types.addFirst(new ArrayType(types.getFirst(), x));
+        }
+        Type type = types.getFirst();
+
+        if (declaredGlobalTable.get(name) != null && !declaredGlobalTable.get(name).equals(type))
+            reportError("different global variables with same name are declared", ctx);
+        declaredGlobalTable.put(name, type);
+        
+        return new NoType();
+    }
+
+    @Override
+    public Type visitLocalIntOrPointerDecl(LocalIntOrPointerDeclContext ctx) {
         String name = ctx.IDENT().getText();
         if (symbolTable.peek().get(name) != null)
             reportError("try declaring a declared variable", ctx);
@@ -194,6 +217,32 @@ public final class MainVisitor extends MiniDecafBaseVisitor<Type> {
               .append("\tsw t0, " + (-4 * localCount) + "(fp)\n");
         }
         
+        return new NoType();
+    }
+
+    @Override
+    public Type visitLocalArrayDecl(LocalArrayDeclContext ctx) {
+        String name = ctx.IDENT().getText();
+        if (symbolTable.peek().get(name) != null)
+            reportError("try declaring a declared variable", ctx);
+
+        // 计算数组的类型
+        Deque<Type> types = new ArrayDeque<>();
+        types.add(visit(ctx.type()).valueCast(ValueCat.LVALUE));
+        for (int i = ctx.NUM().size() - 1; i >= 0; --i) {
+            int x = Integer.valueOf(ctx.NUM(i).getText());
+            if (x == 0)
+                reportError("the dimension of array cannot be 0", ctx);
+            types.addFirst(
+                new ArrayType(types.getFirst(), x));
+        }
+        assert types.getFirst() instanceof ArrayType;
+        ArrayType type = (ArrayType)types.getFirst();
+
+        // 数组等价于若干个全局变量
+        symbolTable.peek().put(name,
+            new Symbol(name, -4 * (localCount += type.getSize() / 4), type));
+
         return new NoType();
     }
 
@@ -446,6 +495,9 @@ public final class MainVisitor extends MiniDecafBaseVisitor<Type> {
             if (!leftType.equals(rightType)) {
                 reportError("the types of the both sides of \"==\"/\"!=\" must be same", ctx);
             }
+            if (leftType instanceof ArrayType || rightType instanceof ArrayType) {
+                reportError("array type cannot take part in equational operation", ctx);
+            }
             
             pop("t1");
             pop("t0");
@@ -620,29 +672,58 @@ public final class MainVisitor extends MiniDecafBaseVisitor<Type> {
     }
 
     @Override
-    public Type visitPostfix(PostfixContext ctx) {
-        if (ctx.children.size() > 1) {
-            String name = ctx.IDENT().getText();
-            if (declaredFuncTable.get(name) == null)
-                reportError("try calling an undeclared function", ctx);
-            FunType funType = declaredFuncTable.get(name);
-            if (funType.paramTypes.size() != ctx.expr().size())
-                reportError("the number of arguments is not equal to the number of parameters", ctx);
-            
-            // 这里我们遵循 riscv gcc 的调用约定
-            sb.append("# prepare arguments\n");
-            for (int i = ctx.expr().size() - 1; i >= 0; --i) {
-                Type type = castToRValue(visit(ctx.expr().get(i)), ctx);
-                if (!type.equals(funType.paramTypes.get(i)))
-                    reportError("the type of argument " + i + " is different from the type of parameter " + i + " of function " + name, ctx);
-                if (i < 8) pop("a" + i); // 前 8 个参数使用寄存器 a0 - a7 传递
-            }
+    public Type visitCallPostfix(CallPostfixContext ctx) {
+        String name = ctx.IDENT().getText();
+        if (declaredFuncTable.get(name) == null)
+            reportError("try calling an undeclared function", ctx);
+        FunType funType = declaredFuncTable.get(name);
+        if (funType.paramTypes.size() != ctx.expr().size())
+            reportError("the number of arguments is not equal to the number of parameters", ctx);
+        
+        // 这里我们遵循 riscv gcc 的调用约定
+        sb.append("# prepare arguments\n");
+        for (int i = ctx.expr().size() - 1; i >= 0; --i) {
+            Type type = castToRValue(visit(ctx.expr().get(i)), ctx);
+            if (!type.equals(funType.paramTypes.get(i)))
+                reportError("the type of argument " + i + " is different from the type of parameter " + i + " of function " + name, ctx);
+            if (i < 8) pop("a" + i); // 前 8 个参数使用寄存器 a0 - a7 传递
+        }
 
-            sb.append("\tcall " + name + "\n");
+        sb.append("\tcall " + name + "\n");
 
-            push("a0"); // 函数的返回值存储在 a0 中
-            return funType.returnType;
-        } else return visit(ctx.primary());
+        push("a0"); // 函数的返回值存储在 a0 中
+        return funType.returnType;
+    }
+
+    @Override
+    public Type visitSubscriptPostfix(SubscriptPostfixContext ctx) {
+        Type postfixType = castToRValue(visit(ctx.postfix()), ctx);
+        typeCheck(visit(ctx.expr()), IntType.class, ValueCat.RVALUE, ctx);
+        pop("t1");
+        pop("t0");
+        if (postfixType instanceof PointerType) {
+            sb.append("# subscript applied to a pointer\n")
+              .append("\tslli t1, t1, 2\n")
+              .append("\tadd t0, t0, t1\n");
+            push("t0");
+            return postfixType.dereferenced();
+        } else if (postfixType instanceof ArrayType) {
+            Type baseType = ((ArrayType)postfixType).baseType;
+            sb.append("# subscript applied to an array\n")
+              .append("\tli t2, " + baseType.getSize() + "\n")
+              .append("\tmul t1, t1, t2\n")
+              .append("\tadd t0, t0, t1\n");
+            push("t0");
+            return baseType;
+        } else {
+            reportError("the subscript operator could only be applied to a pointer or an array", ctx);
+            return new NoType();
+        }
+    }
+
+    @Override
+    public Type visitPrimaryPostfix(PrimaryPostfixContext ctx) {
+        return visit(ctx.primary());
     }
 
     @Override
@@ -734,6 +815,8 @@ public final class MainVisitor extends MiniDecafBaseVisitor<Type> {
      * @return 转换后的结果类型
      */
     private Type typeCheck(Type actualType, Class<?> expectedType, ValueCat neededValueCat, ParserRuleContext ctx) {
+        System.out.println("typeCheck: actualType = " + actualType + ", expectedType = " + expectedType);
+
         if (!expectedType.isAssignableFrom(actualType.getClass()))
             reportError("type " + actualType + " appears, but " + expectedType.getName() + " is expected", ctx);
         if (neededValueCat == ValueCat.LVALUE && actualType.valueCat == ValueCat.RVALUE)
